@@ -91,15 +91,16 @@ class CheckersGame:
             self.game_time = int(time.time() - self.start_time)
             
     def get_valid_moves(self, row, col):
-        """Get valid moves for a piece"""
+        """Get valid moves for a piece, prioritizing jumps and detecting multiple jumps"""
         if not self.board[row][col]:
             return []
             
         piece = self.board[row][col]
         valid_moves = []
+        mandatory_jumps = []
         
         # Direction depends on player and piece type
-        if piece["type"] == "king":  # Changed from PieceType.KING.value
+        if piece["type"] == "king":
             directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
         else:
             if piece["player"] == 1:
@@ -107,25 +108,38 @@ class CheckersGame:
             else:
                 directions = [(-1, -1), (-1, 1)]
                 
+        # First check for jumps
+        for dr, dc in directions:
+            new_row, new_col = row + dr, col + dc
+            
+            # Check bounds
+            if 0 <= new_row < 8 and 0 <= new_col < 8:
+                if (self.board[new_row][new_col] and 
+                    self.board[new_row][new_col]["player"] != piece["player"]):
+                    # Check for jump space
+                    jump_row, jump_col = new_row + dr, new_col + dc
+                    if (0 <= jump_row < 8 and 0 <= jump_col < 8 and 
+                        not self.board[jump_row][jump_col]):
+                        # This is a valid jump
+                        mandatory_jumps.append((jump_row, jump_col, True))
+                        
+        # If there are jumps available, only return jumps
+        if mandatory_jumps:
+            return mandatory_jumps
+            
+        # If no jumps, return regular moves
         for dr, dc in directions:
             new_row, new_col = row + dr, col + dc
             
             # Check bounds
             if 0 <= new_row < 8 and 0 <= new_col < 8:
                 if not self.board[new_row][new_col]:
-                    # Simple move
                     valid_moves.append((new_row, new_col, False))
-                elif (self.board[new_row][new_col]["player"] != piece["player"]):
-                    # Check for jump
-                    jump_row, jump_col = new_row + dr, new_col + dc
-                    if (0 <= jump_row < 8 and 0 <= jump_col < 8 and 
-                        not self.board[jump_row][jump_col]):
-                        valid_moves.append((jump_row, jump_col, True))
-                        
+                    
         return valid_moves
-        
+
     def make_move(self, player_id, from_pos, to_pos):
-        """Process a move"""
+        """Process a move with mandatory jump rules"""
         with self.lock:
             if (self.state != GameState.PLAYING or 
                 self.current_player != player_id):
@@ -133,6 +147,16 @@ class CheckersGame:
                 
             from_row, from_col = from_pos
             to_row, to_col = to_pos
+            
+            # First check if there are any mandatory jumps available
+            has_mandatory_jumps = False
+            for row in range(8):
+                for col in range(8):
+                    if self.board[row][col] and self.board[row][col]["player"] == player_id:
+                        moves = self.get_valid_moves(row, col)
+                        if any(move[2] for move in moves):  # If any move is a jump
+                            has_mandatory_jumps = True
+                            break
             
             # Validate move
             valid_moves = self.get_valid_moves(from_row, from_col)
@@ -145,7 +169,11 @@ class CheckersGame:
             else:
                 return False  # Invalid move
                 
-            # Make the move
+            # If there are mandatory jumps, the move must be a jump
+            if has_mandatory_jumps and not is_jump:
+                return False
+                
+            # Make the move (rest of the existing move logic remains the same)
             piece = self.board[from_row][from_col]
             self.board[to_row][to_col] = piece
             self.board[from_row][from_col] = None
@@ -164,11 +192,37 @@ class CheckersGame:
                     self.score[f"player{player_id}"] += 1
                     self.lives[f"player{opponent}"] -= 1
                     
+                # Check for additional jumps
+                additional_jumps = []
+                if piece["type"] == "king":
+                    directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+                else:
+                    if piece["player"] == 1:
+                        directions = [(1, -1), (1, 1)]
+                    else:
+                        directions = [(-1, -1), (-1, 1)]
+                        
+                for dr, dc in directions:
+                    jump_row, jump_col = to_row + dr, to_col + dc
+                    if 0 <= jump_row < 8 and 0 <= jump_col < 8:
+                        if (self.board[jump_row][jump_col] and 
+                            self.board[jump_row][jump_col]["player"] != player_id):
+                            # Check landing spot
+                            land_row, land_col = jump_row + dr, jump_col + dc
+                            if (0 <= land_row < 8 and 0 <= land_col < 8 and 
+                                not self.board[land_row][land_col]):
+                                additional_jumps.append((land_row, land_col))
+                
+                if additional_jumps:
+                    # Don't switch players - same player gets another turn
+                    self.broadcast_game_update()
+                    return True
+            
             # Check for king promotion
             if piece["player"] == 1 and to_row == 7:
-                piece["type"] = "king"  # Changed from PieceType.KING.value
+                piece["type"] = "king"
             elif piece["player"] == 2 and to_row == 0:
-                piece["type"] = "king"  # Changed from PieceType.KING.value
+                piece["type"] = "king"
                 
             # Check for game over
             if self.lives["player1"] == 0:
@@ -178,7 +232,7 @@ class CheckersGame:
                 self.state = GameState.GAME_OVER
                 self.end_game(1)
             else:
-                # Switch player
+                # Switch player only if no additional jumps available
                 self.current_player = 2 if self.current_player == 1 else 1
                 
             # Update game time
@@ -187,7 +241,7 @@ class CheckersGame:
             # Send update to all players
             self.broadcast_game_update()
             return True
-            
+    
     def end_game(self, winner):
         """End the game"""
         message = {

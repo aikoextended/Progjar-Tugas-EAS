@@ -137,56 +137,42 @@ class CheckersClient:
             
         elif msg_type == "invalid_move":
             print("Invalid move!")
-            
-    def get_valid_moves(self, row, col):
-        """Get valid moves for a piece"""
-        if not self.board[row][col]:
-            return []
-            
-        piece = self.board[row][col]
-        valid_moves = []
-        
-        # Direction depends on player and piece type
-        if piece["type"] == "king":  # Changed from PieceType.KING
-            directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
-        else:
-            if piece["player"] == 1:
-                directions = [(1, -1), (1, 1)]
-            else:
-                directions = [(-1, -1), (-1, 1)]
-                
-        for dr, dc in directions:
-            new_row, new_col = row + dr, col + dc
-            
-            # Check bounds
-            if 0 <= new_row < 8 and 0 <= new_col < 8:
-                if not self.board[new_row][new_col]:
-                    # Simple move
-                    valid_moves.append((new_row, new_col))
-                elif (self.board[new_row][new_col]["player"] != piece["player"]):
-                    # Check for jump
-                    jump_row, jump_col = new_row + dr, new_col + dc
-                    if (0 <= jump_row < 8 and 0 <= jump_col < 8 and 
-                        not self.board[jump_row][jump_col]):
-                        valid_moves.append((jump_row, jump_col))
-                        
-        return valid_moves
-        
-    def make_move(self, from_pos, to_pos):
-        """Make a move"""
+   
+    def get_pieces_with_mandatory_moves(self):
+        """Get all pieces that have mandatory jumps available"""
+        mandatory_pieces = []
         if self.game_state != GameState.PLAYING or self.current_player != self.player_id:
-            return False
+            return mandatory_pieces
             
-        move_data = {
-            "type": "make_move",
-            "from": from_pos,
-            "to": to_pos
-        }
-        self.send_message(move_data)
-        return True
-        
+        for row in range(8):
+            for col in range(8):
+                if (self.board[row][col] and 
+                    self.board[row][col]["player"] == self.player_id):
+                    moves = self.get_valid_moves(row, col)
+                    # Check if any move is a jump
+                    if any(abs(move[0] - row) > 1 for move in moves):
+                        mandatory_pieces.append((row, col))
+        return mandatory_pieces
+
+    def get_movable_pieces(self):
+        """Get all pieces that can move (either mandatory jumps or regular moves)"""
+        movable_pieces = []
+        if self.game_state != GameState.PLAYING or self.current_player != self.player_id:
+            return movable_pieces
+            
+        for row in range(8):
+            for col in range(8):
+                if (self.board[row][col] and 
+                    self.board[row][col]["player"] == self.player_id):
+                    if self.get_valid_moves(row, col):  # If piece has any valid moves
+                        movable_pieces.append((row, col))
+        return movable_pieces
+
     def draw_board(self):
-        """Draw the checkers board"""
+        """Draw the checkers board with visual cues for movable pieces"""
+        mandatory_pieces = self.get_pieces_with_mandatory_moves()
+        movable_pieces = self.get_movable_pieces()
+        
         for row in range(8):
             for col in range(8):
                 x = col * self.CELL_SIZE
@@ -199,6 +185,14 @@ class CheckersClient:
                     color = self.DARK_BROWN
                     
                 pygame.draw.rect(self.screen, color, (x, y, self.CELL_SIZE, self.CELL_SIZE))
+                
+                # Highlight pieces based on move rules
+                if (row, col) in mandatory_pieces:
+                    # Red outline for pieces with mandatory jumps
+                    pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
+                elif not mandatory_pieces and (row, col) in movable_pieces:
+                    # Blue outline for movable pieces when no mandatory jumps
+                    pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
                 
                 # Draw piece
                 if self.board[row][col]:
@@ -217,22 +211,137 @@ class CheckersClient:
                     pygame.draw.circle(self.screen, self.BLACK, (center_x, center_y), 30, 3)
                     
                     # Draw king crown
-                    if piece["type"] == "king":  # Changed from PieceType.KING
+                    if piece["type"] == "king":
                         pygame.draw.circle(self.screen, self.YELLOW, (center_x, center_y), 15)
                         
-                # Highlight selected piece
+        if self.selected_piece and self.current_player == self.player_id:
+            row, col = self.selected_piece
+            x = col * self.CELL_SIZE
+            y = row * self.CELL_SIZE
+            
+            # Highlight selected piece with thick green border
+            pygame.draw.rect(self.screen, self.GREEN, (x, y, self.CELL_SIZE, self.CELL_SIZE), 5)
+            
+            # Draw valid moves with more visible indicators
+            valid_moves = self.get_valid_moves(row, col)
+            for move_row, move_col in valid_moves:
+                move_x = move_col * self.CELL_SIZE
+                move_y = move_row * self.CELL_SIZE
+                pygame.draw.circle(self.screen, self.GREEN, 
+                                (move_x + self.CELL_SIZE//2, move_y + self.CELL_SIZE//2), 10)
+
+    def handle_click(self, pos):
+        """Handle mouse click with move enforcement"""
+        if pos[0] >= self.BOARD_SIZE:  # Click outside board
+            return
+            
+        col = pos[0] // self.CELL_SIZE
+        row = pos[1] // self.CELL_SIZE
+        
+        if 0 <= row < 8 and 0 <= col < 8:
+            mandatory_pieces = self.get_pieces_with_mandatory_moves()
+            movable_pieces = self.get_movable_pieces()
+            
+            if self.selected_piece is None:
+                # Select piece - enforce move rules
+                if (self.board[row][col] and 
+                    self.board[row][col]["player"] == self.player_id and
+                    self.current_player == self.player_id and
+                    self.game_state == GameState.PLAYING):
+                    
+                    # Check if piece is movable
+                    if (row, col) not in movable_pieces:
+                        print("This piece cannot move!")
+                        return
+                    
+                    # If there are mandatory pieces, only allow selecting them
+                    if mandatory_pieces:
+                        if (row, col) in mandatory_pieces:
+                            self.selected_piece = (row, col)
+                            print(f"Selected mandatory piece at ({row}, {col})")
+                        else:
+                            print("You must select a piece with mandatory moves first!")
+                            return
+                    else:
+                        self.selected_piece = (row, col)
+                        print(f"Selected piece at ({row}, {col})")
+            else:
+                # Try to move
                 if self.selected_piece == (row, col):
-                    pygame.draw.rect(self.screen, self.GREEN, (x, y, self.CELL_SIZE, self.CELL_SIZE), 5)
+                    # Deselect
+                    self.selected_piece = None
+                    print("Deselected piece")
+                else:
+                    # Attempt move
+                    valid_moves = self.get_valid_moves(*self.selected_piece)
+                    if (row, col) in [(move[0], move[1]) for move in valid_moves]:
+                        print(f"Making move from {self.selected_piece} to ({row}, {col})")
+                        self.make_move(self.selected_piece, (row, col))
+                    else:
+                        print(f"Invalid move to ({row}, {col})")
+                    self.selected_piece = None
+
+    def get_valid_moves(self, row, col):
+        """Get valid moves for a piece, prioritizing jumps and detecting multiple jumps"""
+        if not self.board[row][col]:
+            return []
+            
+        piece = self.board[row][col]
+        valid_moves = []
+        mandatory_jumps = []
+        
+        # Direction depends on player and piece type
+        if piece["type"] == "king":
+            directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        else:
+            if piece["player"] == 1:
+                directions = [(1, -1), (1, 1)]
+            else:
+                directions = [(-1, -1), (-1, 1)]
+                
+        # First check for jumps
+        for dr, dc in directions:
+            new_row, new_col = row + dr, col + dc
+            
+            # Check bounds
+            if 0 <= new_row < 8 and 0 <= new_col < 8:
+                if (self.board[new_row][new_col] and 
+                    self.board[new_row][new_col]["player"] != piece["player"]):
+                    # Check for jump space
+                    jump_row, jump_col = new_row + dr, new_col + dc
+                    if (0 <= jump_row < 8 and 0 <= jump_col < 8 and 
+                        not self.board[jump_row][jump_col]):
+                        # This is a valid jump
+                        mandatory_jumps.append((jump_row, jump_col))
+                        
+        # If there are jumps available, only return jumps
+        if mandatory_jumps:
+            return mandatory_jumps
+            
+        # If no jumps, return regular moves
+        for dr, dc in directions:
+            new_row, new_col = row + dr, col + dc
+            
+            # Check bounds
+            if 0 <= new_row < 8 and 0 <= new_col < 8:
+                if not self.board[new_row][new_col]:
+                    valid_moves.append((new_row, new_col))
                     
-                    # Show valid moves
-                    if self.selected_piece:
-                        valid_moves = self.get_valid_moves(*self.selected_piece)
-                        for move_row, move_col in valid_moves:
-                            move_x = move_col * self.CELL_SIZE
-                            move_y = move_row * self.CELL_SIZE
-                            pygame.draw.circle(self.screen, self.GREEN, 
-                                             (move_x + self.CELL_SIZE//2, move_y + self.CELL_SIZE//2), 10)
-                    
+        return valid_moves
+        
+    def make_move(self, from_pos, to_pos):
+        """Make a move"""
+        if self.game_state != GameState.PLAYING or self.current_player != self.player_id:
+            return False
+            
+        move_data = {
+            "type": "make_move",
+            "from": from_pos,
+            "to": to_pos
+        }
+        self.send_message(move_data)
+        return True
+        
     def draw_ui(self):
         """Draw the user interface"""
         # Game info panel
@@ -305,40 +414,6 @@ class CheckersClient:
         text_surface = self.font.render(state_text, True, color)
         self.screen.blit(text_surface, (info_x, 320))
         
-    def handle_click(self, pos):
-        """Handle mouse click"""
-        if pos[0] >= self.BOARD_SIZE:  # Click outside board
-            return
-            
-        col = pos[0] // self.CELL_SIZE
-        row = pos[1] // self.CELL_SIZE
-        
-        if 0 <= row < 8 and 0 <= col < 8:
-            if self.selected_piece is None:
-                # Select piece
-                if (self.board[row][col] and 
-                    self.board[row][col]["player"] == self.player_id and
-                    self.current_player == self.player_id and
-                    self.game_state == GameState.PLAYING):
-                    self.selected_piece = (row, col)
-                    print(f"Selected piece at ({row}, {col})")
-            else:
-                # Try to move
-                if self.selected_piece == (row, col):
-                    # Deselect
-                    self.selected_piece = None
-                    print("Deselected piece")
-                else:
-                    # Attempt move
-                    valid_moves = self.get_valid_moves(*self.selected_piece)
-                    print(f"Valid moves: {valid_moves}")
-                    if (row, col) in valid_moves:
-                        print(f"Making move from {self.selected_piece} to ({row}, {col})")
-                        self.make_move(self.selected_piece, (row, col))
-                    else:
-                        print(f"Invalid move to ({row}, {col})")
-                    self.selected_piece = None
-                    
     def run(self):
         """Main game loop"""
         if not self.connect_to_server():
