@@ -30,6 +30,7 @@ class CheckersGame:
         self.start_time = None
         self.game_time = 0
         self.winner = None
+        self.restart_requests = set()  # Track which players want to restart
 
         self.initialize_board()
 
@@ -56,6 +57,41 @@ class CheckersGame:
         self.start_time = time.time()
         self.current_player = 1 
 
+    def restart_game(self):
+        """Restart the game with the same players"""
+        # Reset game state
+        self.board = [[None for _ in range(8)] for _ in range(8)]
+        self.current_player = 1
+        self.state = GameState.PLAYING
+        self.score = {"player1": 0, "player2": 0}
+        self.lives = {"player1": 12, "player2": 12}
+        self.start_time = time.time()
+        self.game_time = 0
+        self.winner = None
+        self.restart_requests.clear()  # Clear restart requests
+        
+        # Reinitialize board with pieces
+        self.initialize_board()
+        
+        print(f"Game {self.game_id} restarted with players: {list(self.players.keys())}")
+
+    def request_restart(self, player_id):
+        """Handle restart request from a player"""
+        if player_id not in self.players:
+            return {"status": "error", "message": "Player not in this game"}
+        
+        # Add player to restart requests
+        self.restart_requests.add(player_id)
+        
+        # Check if both players want to restart
+        if len(self.restart_requests) == 2:
+            # Both players agreed, restart the game
+            self.restart_game()
+            return {"status": "game_restarted"}
+        else:
+            # Still waiting for other player
+            return {"status": "restart_requested", "waiting_for": len(self.players) - len(self.restart_requests)}
+
     def get_state(self, player_id=None):
         self.update_game_time()
         board_serializable = copy.deepcopy(self.board)
@@ -75,7 +111,9 @@ class CheckersGame:
             "winner": self.winner,
             "player_id": player_id,
             "my_player_number": my_game_position,
-            "your_turn": self.current_player == my_game_position if my_game_position else False
+            "your_turn": self.current_player == my_game_position if my_game_position else False,
+            "restart_requests": len(self.restart_requests),  # Include restart status
+            "restart_requested_by_me": player_id in self.restart_requests if player_id else False
         }
     
     def update_game_time(self):
@@ -310,7 +348,7 @@ class HttpServer:
             
             return self.response(200, 'OK', json.dumps(response_data), {'Content-Type': 'application/json'})
 
-        if object_address == '/make_move':
+        elif object_address == '/make_move':
             game_id = payload.get('game_id')
             player_id = payload.get('player_id')
             from_pos = payload.get('from')
@@ -321,6 +359,31 @@ class HttpServer:
                 return self.response(200, 'OK', json.dumps(game.get_state(player_id)), {'Content-Type': 'application/json'})
             else:
                 return self.response(400, 'Bad Request', 'Invalid move', {})
+
+        elif object_address == '/restart_game':
+            game_id = payload.get('game_id')
+            player_id = payload.get('player_id')
+            
+            # Validate that the game exists and player is part of it
+            game = self.games.get(game_id)
+            if not game:
+                return self.response(404, 'Not Found', 'Game not found', {})
+            
+            if player_id not in game.players:
+                return self.response(403, 'Forbidden', 'Player not in this game', {})
+            
+            # Request restart (requires both players' consent)
+            result = game.request_restart(player_id)
+            
+            if result["status"] == "game_restarted":
+                print(f"Game {game_id} restarted - both players agreed")
+                # Return the new game state
+                return self.response(200, 'OK', json.dumps(game.get_state(player_id)), {'Content-Type': 'application/json'})
+            elif result["status"] == "restart_requested":
+                print(f"Game {game_id}: Player {player_id} requested restart, waiting for other player")
+                return self.response(200, 'OK', json.dumps(result), {'Content-Type': 'application/json'})
+            else:
+                return self.response(400, 'Bad Request', json.dumps(result), {'Content-Type': 'application/json'})
         
         return self.response(404, 'Not Found', '', {})
 

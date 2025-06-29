@@ -33,12 +33,14 @@ class CheckersClient:
         self.game_time = 0
         self.winner = None
         self.status_message = "Connecting to server..."
+        self.restart_button = None
+        self.restart_requested = False  # Track if restart was requested
         
         # Pygame setup
         pygame.init()
         self.BOARD_SIZE = 640
         self.CELL_SIZE = self.BOARD_SIZE // 8
-        self.screen = pygame.display.set_mode((self.BOARD_SIZE + 200, self.BOARD_SIZE))
+        self.screen = pygame.display.set_mode((self.BOARD_SIZE + 250, self.BOARD_SIZE))
         pygame.display.set_caption("Checkers Game (HTTP Client)")
         
         # Colors
@@ -137,6 +139,47 @@ class CheckersClient:
         self.winner = state.get("winner")
         self.is_my_turn = state.get("your_turn", False)
         self.my_player_number = state.get("my_player_number")
+        
+        # Clear selected piece if game is over
+        if self.game_state == GameState.GAME_OVER:
+            self.selected_piece = None
+            
+        # Reset restart_requested if game started again
+        if self.game_state == GameState.PLAYING and self.restart_requested:
+            self.restart_requested = False
+            print("Game restarted successfully!")
+
+    def restart_game(self):
+        """Request restart for the current game (same players)"""
+        if not self.game_id or not self.player_id:
+            print("Cannot restart: no active game")
+            return
+            
+        self.status_message = "Requesting restart..."
+        self.restart_requested = True
+        self.selected_piece = None
+        
+        payload = {
+            "game_id": self.game_id,
+            "player_id": self.player_id
+        }
+        
+        response = self.http_request('POST', '/restart_game', payload)
+        if response:
+            if response.get('status') == 'restart_requested':
+                self.status_message = "Waiting for opponent to agree..."
+                print("Restart requested. Waiting for opponent...")
+            elif response.get('status') == 'game_restarted':
+                self.status_message = "Game restarted!"
+                # The background updater will handle the state update
+                print("Both players agreed! Game restarted.")
+            else:
+                self.status_message = "Restart failed"
+                self.restart_requested = False
+        else:
+            print("Failed to request restart.")
+            self.status_message = "Restart request failed."
+            self.restart_requested = False
 
     def make_move(self, from_pos, to_pos):
         """Send a move to the server."""
@@ -158,30 +201,34 @@ class CheckersClient:
         self.selected_piece = None
 
     def get_pieces_with_mandatory_moves(self):
+        """Get pieces that have mandatory jump moves - only for current player's turn"""
         mandatory_pieces = []
-        is_my_turn = self.game_state == GameState.PLAYING and self.current_player == (1 if self.player_id and '1' in self.player_id else 2) 
         
-        if self.game_state != GameState.PLAYING:
+        # Only show mandatory moves if it's my turn and game is playing
+        if not (self.game_state == GameState.PLAYING and self.is_my_turn):
             return mandatory_pieces
             
         for row in range(8):
             for col in range(8):
                 if (self.board[row][col] and 
-                    self.board[row][col]["player"] == self.current_player): # Check current player's pieces
+                    self.board[row][col]["player"] == self.my_player_number):
                     moves = self.get_valid_moves(row, col)
                     if any(abs(move[0] - row) > 1 for move in moves):
                         mandatory_pieces.append((row, col))
         return mandatory_pieces
 
     def get_movable_pieces(self):
+        """Get pieces that can move - only for current player's turn"""
         movable_pieces = []
-        if self.game_state != GameState.PLAYING:
-             return movable_pieces
+        
+        # Only show movable pieces if it's my turn and game is playing
+        if not (self.game_state == GameState.PLAYING and self.is_my_turn):
+            return movable_pieces
         
         for row in range(8):
             for col in range(8):
                 if (self.board[row][col] and 
-                    self.board[row][col]["player"] == self.current_player):
+                    self.board[row][col]["player"] == self.my_player_number):
                     if self.get_valid_moves(row, col):
                         movable_pieces.append((row, col))
         return movable_pieces
@@ -196,22 +243,25 @@ class CheckersClient:
                 color = self.LIGHT_BROWN if (row + col) % 2 == 0 else self.DARK_BROWN
                 pygame.draw.rect(self.screen, color, (x, y, self.CELL_SIZE, self.CELL_SIZE))
 
-                if (row, col) in mandatory_pieces:
-                    pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
-                elif not mandatory_pieces and (row, col) in movable_pieces:
-                    pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
+                # Only show borders if it's my turn and game is still playing
+                if self.is_my_turn and self.game_state == GameState.PLAYING:
+                    if (row, col) in mandatory_pieces:
+                        pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
+                    elif not mandatory_pieces and (row, col) in movable_pieces:
+                        pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
 
                 piece = self.board[row][col]
                 if piece:
                     center_x, center_y = x + self.CELL_SIZE // 2, y + self.CELL_SIZE // 2
-                    piece_color = self.RED if piece["player"] == 1 else self.BLUE
+                    piece_color = self.BLUE if piece["player"] == 1 else self.RED
                     pygame.draw.circle(self.screen, piece_color, (center_x, center_y), 30)
                     pygame.draw.circle(self.screen, self.BLACK, (center_x, center_y), 30, 3)
                     
                     if piece["type"] == PieceType.KING.value:
                         pygame.draw.circle(self.screen, self.YELLOW, (center_x, center_y), 15)
 
-        if self.selected_piece:
+        # Don't show selected piece and valid moves if game is over
+        if self.selected_piece and self.game_state == GameState.PLAYING:
             row, col = self.selected_piece
             x, y = col * self.CELL_SIZE, row * self.CELL_SIZE
             pygame.draw.rect(self.screen, self.GREEN, (x, y, self.CELL_SIZE, self.CELL_SIZE), 5)
@@ -254,7 +304,20 @@ class CheckersClient:
         return valid_moves
 
     def handle_click(self, pos):
+        # Check if restart button was clicked
+        if (self.game_state == GameState.GAME_OVER and 
+            hasattr(self, 'restart_button') and 
+            self.restart_button and 
+            self.restart_button.collidepoint(pos)):
+            self.restart_game()
+            return
+            
         if pos[0] >= self.BOARD_SIZE: return
+        
+        # Don't allow board clicks if game is over
+        if self.game_state == GameState.GAME_OVER:
+            print("Game is over! Click RESTART GAME to play again.")
+            return
             
         col = pos[0] // self.CELL_SIZE
         row = pos[1] // self.CELL_SIZE
@@ -267,7 +330,8 @@ class CheckersClient:
             mandatory_pieces = self.get_pieces_with_mandatory_moves()
             
             if self.selected_piece is None:
-                if (self.board[row][col] and self.board[row][col]["player"] == self.current_player):
+                if (self.board[row][col] and 
+                    self.board[row][col]["player"] == self.my_player_number):
                     if mandatory_pieces and (row, col) not in mandatory_pieces:
                         print("You must make a mandatory jump.")
                         return
@@ -283,42 +347,84 @@ class CheckersClient:
                         print("Invalid move.")
                         self.selected_piece = None
 
-
     def draw_ui(self):
         info_x = self.BOARD_SIZE + 10
         
         # Game State
-        state_text = f"Status: {self.game_state.value.replace('_', ' ').title()}"
         if self.game_state == GameState.WAITING:
             state_text = self.status_message
         elif self.game_state == GameState.GAME_OVER:
-            state_text = f"Game Over! Winner: Player {self.winner}"
+            if self.winner == self.my_player_number:
+                state_text = "🎉 YOU WIN! 🎉"
+                state_color = self.GREEN
+            else:
+                state_text = "💀 YOU LOSE 💀"
+                state_color = self.RED
+        else:
+            state_text = f"Status: {self.game_state.value.replace('_', ' ').title()}"
+            state_color = self.BLACK
 
-        text_surface = self.font.render(state_text, True, self.BLACK)
+        if self.game_state == GameState.GAME_OVER:
+            text_surface = self.font.render(state_text, True, state_color)
+        else:
+            text_surface = self.font.render(state_text, True, self.BLACK)
         self.screen.blit(text_surface, (info_x, 20))
 
         # Player Info
-        player_text = f"You are Player {self.my_player_number}" if self.my_player_number else "You are a spectator"
+        if self.my_player_number:
+            player_text = f"You are Player {self.my_player_number}"
+            player_color = self.BLUE if self.my_player_number == 1 else self.RED
+        else:
+            player_text = "You are a spectator"
+            player_color = self.GRAY
 
-        text_surface = self.small_font.render(player_text, True, self.BLACK)
+        text_surface = self.small_font.render(player_text, True, player_color)
         self.screen.blit(text_surface, (info_x, 60))
         
         # Turn Info
-        turn_text = f"Turn: Player {self.current_player}"
-        color = self.RED if self.current_player == 1 else self.BLUE
-        text_surface = self.font.render(turn_text, True, color)
+        if self.game_state == GameState.PLAYING:
+            if self.is_my_turn:
+                turn_text = "🔥 YOUR TURN 🔥"
+                turn_color = self.GREEN
+            else:
+                turn_text = f"Opponent's Turn (Player {self.current_player})"
+                turn_color = self.GRAY
+        else:
+            turn_text = f"Turn: Player {self.current_player}"
+            turn_color = self.BLUE if self.current_player == 1 else self.RED
+            
+        text_surface = self.font.render(turn_text, True, turn_color)
         self.screen.blit(text_surface, (info_x, 100))
         
         # Score and Lives
         p1_lives = f"Player 1 Pieces: {self.lives.get('player1', 12)}"
-        self.screen.blit(self.small_font.render(p1_lives, True, self.RED), (info_x, 140))
+        self.screen.blit(self.small_font.render(p1_lives, True, self.BLUE), (info_x, 140))
         p2_lives = f"Player 2 Pieces: {self.lives.get('player2', 12)}"
-        self.screen.blit(self.small_font.render(p2_lives, True, self.BLUE), (info_x, 160))
+        self.screen.blit(self.small_font.render(p2_lives, True, self.RED), (info_x, 160))
 
         # Game Time
         time_text = f"Time: {self.game_time//60:02d}:{self.game_time%60:02d}"
         self.screen.blit(self.small_font.render(time_text, True, self.BLACK), (info_x, 200))
-
+        
+        # Show restart status if waiting for opponent
+        if self.restart_requested and "Waiting for opponent" in self.status_message:
+            restart_status = self.small_font.render("Restart requested...", True, self.YELLOW)
+            self.screen.blit(restart_status, (info_x, 220))
+        
+        # Restart Button (only show when game is over)
+        if self.game_state == GameState.GAME_OVER:
+            restart_button = pygame.Rect(info_x, 240, 150, 40)
+            pygame.draw.rect(self.screen, self.GREEN, restart_button)
+            pygame.draw.rect(self.screen, self.BLACK, restart_button, 2)
+            
+            restart_text = self.small_font.render("RESTART GAME", True, self.WHITE)
+            text_rect = restart_text.get_rect(center=restart_button.center)
+            self.screen.blit(restart_text, text_rect)
+            
+            # Store button rect for click detection
+            self.restart_button = restart_button
+        else:
+            self.restart_button = None
 
     def run(self):
         """Main game loop"""
