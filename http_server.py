@@ -117,7 +117,7 @@ class CheckersGame:
         }
     
     def update_game_time(self):
-        if self.start_time:
+        if self.start_time and self.state != GameState.GAME_OVER:
             self.game_time = int(time.time() - self.start_time)
 
 

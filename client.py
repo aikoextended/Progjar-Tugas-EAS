@@ -355,10 +355,10 @@ class CheckersClient:
             state_text = self.status_message
         elif self.game_state == GameState.GAME_OVER:
             if self.winner == self.my_player_number:
-                state_text = "🎉 YOU WIN! 🎉"
+                state_text = "YOU WIN!"
                 state_color = self.GREEN
             else:
-                state_text = "💀 YOU LOSE 💀"
+                state_text = "YOU LOSE"
                 state_color = self.RED
         else:
             state_text = f"Status: {self.game_state.value.replace('_', ' ').title()}"
@@ -384,10 +384,10 @@ class CheckersClient:
         # Turn Info
         if self.game_state == GameState.PLAYING:
             if self.is_my_turn:
-                turn_text = "🔥 YOUR TURN 🔥"
+                turn_text = "YOUR TURN"
                 turn_color = self.GREEN
             else:
-                turn_text = f"Opponent's Turn (Player {self.current_player})"
+                turn_text = f"Opponent's Turn"
                 turn_color = self.GRAY
         else:
             turn_text = f"Turn: Player {self.current_player}"
