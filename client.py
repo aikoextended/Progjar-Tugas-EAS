@@ -1,8 +1,9 @@
 import pygame
-import socket
+import http.client
 import json
 import threading
 import sys
+import time
 from enum import Enum
 
 class GameState(Enum):
@@ -18,8 +19,11 @@ class CheckersClient:
     def __init__(self, host='localhost', port=8080):
         self.host = host
         self.port = port
-        self.socket = None
         self.player_id = None
+        self.game_id = None
+        self.is_my_turn = False
+        self.my_player_number = None
+        
         self.game_state = GameState.WAITING
         self.board = [[None for _ in range(8)] for _ in range(8)]
         self.current_player = 1
@@ -27,13 +31,15 @@ class CheckersClient:
         self.score = {"player1": 0, "player2": 0}
         self.lives = {"player1": 12, "player2": 12}
         self.game_time = 0
+        self.winner = None
+        self.status_message = "Connecting to server..."
         
         # Pygame setup
         pygame.init()
         self.BOARD_SIZE = 640
         self.CELL_SIZE = self.BOARD_SIZE // 8
-        self.screen = pygame.display.set_mode((self.BOARD_SIZE + 200, self.BOARD_SIZE + 100))
-        pygame.display.set_caption("Checkers Game")
+        self.screen = pygame.display.set_mode((self.BOARD_SIZE + 200, self.BOARD_SIZE))
+        pygame.display.set_caption("Checkers Game (HTTP Client)")
         
         # Colors
         self.WHITE = (255, 255, 255)
@@ -49,377 +55,282 @@ class CheckersClient:
         self.font = pygame.font.Font(None, 36)
         self.small_font = pygame.font.Font(None, 24)
         
-        # Initialize board
         self.initialize_board()
-        
+
     def initialize_board(self):
         """Initialize the checkers board with pieces"""
         for row in range(8):
             for col in range(8):
                 if (row + col) % 2 == 1:  # Dark squares only
                     if row < 3:
-                        self.board[row][col] = {"player": 1, "type": PieceType.REGULAR}
+                        self.board[row][col] = {"player": 1, "type": PieceType.REGULAR.value}
                     elif row > 4:
-                        self.board[row][col] = {"player": 2, "type": PieceType.REGULAR}
-                        
-    def connect_to_server(self):
-        """Connect to the game server"""
+                        self.board[row][col] = {"player": 2, "type": PieceType.REGULAR.value}
+
+    def http_request(self, method, path, payload=None):
+        """Helper function to make HTTP requests."""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.host, self.port))
+            conn = http.client.HTTPConnection(self.host, self.port)
+            headers = {'Content-type': 'application/json'}
+            body = json.dumps(payload) if payload else None
             
-            # Start receiving thread
-            receive_thread = threading.Thread(target=self.receive_messages)
-            receive_thread.daemon = True
-            receive_thread.start()
+            conn.request(method, path, body, headers)
+            response = conn.getresponse()
             
-            # Send join game request
-            self.send_message({"type": "join_game"})
+            data = response.read()
+            conn.close()
+            
+            if response.status >= 200 and response.status < 300:
+                return json.loads(data.decode())
+            else:
+                print(f"Error: {response.status} {response.reason} - {data.decode()}")
+                return None
+        except Exception as e:
+            print(f"HTTP request failed: {e}")
+            self.status_message = "Server connection failed."
+            return None
+
+    def join_game(self):
+        """Send a request to join a game."""
+        self.status_message = "Finding a match..."
+        response = self.http_request('POST', '/join_game')
+        if response:
+            self.player_id = response.get('player_id')
+            self.game_id = response.get('game_id')
+            print(f"Joined game. Player ID: {self.player_id}, Game ID: {self.game_id}")
             return True
-        except Exception as e:
-            print(f"Failed to connect to server: {e}")
-            return False
-            
-    def send_message(self, message):
-        """Send message to server"""
-        try:
-            if self.socket:
-                message_str = json.dumps(message) + '\n'
-                self.socket.send(message_str.encode())
-        except Exception as e:
-            print(f"Error sending message: {e}")
-            
-    def receive_messages(self):
-        """Receive messages from server"""
-        buffer = ""
+        return False
+
+    def background_updater(self):
+        """Handles background polling for game start and game state."""
         while True:
-            try:
-                data = self.socket.recv(1024).decode()
-                if not data:
-                    break
-                    
-                buffer += data
-                while '\n' in buffer:
-                    line, buffer = buffer.split('\n', 1)
-                    if line.strip():
-                        message = json.loads(line.strip())
-                        self.handle_server_message(message)
-                        
-            except Exception as e:
-                print(f"Error receiving message: {e}")
-                break
-                
-    def handle_server_message(self, message):
-        """Handle messages from server"""
-        msg_type = message.get("type")
+            if not self.player_id:
+                time.sleep(0.2)
+                continue
+
+            # --- Stage 1: Check if the game has started ---
+            if self.game_id is None:
+                self.status_message = "Finding a match..."
+                path = f"/check_status?player_id={self.player_id}"
+                response = self.http_request('GET', path)
+                if response and response.get('status') == 'game_started':
+                    self.game_id = response.get('game_id')
+                    print(f"Game found! Game ID: {self.game_id}")
+
+            # --- Stage 2: Once in a game, poll for its state ---
+            else:
+                path = f"/game_state?game_id={self.game_id}&player_id={self.player_id}"
+                state = self.http_request('GET', path)
+                if state:
+                    self.update_local_state(state)
+
+            time.sleep(0.2)
+
+    def update_local_state(self, state):
+        """Update the client's game state from server data."""
+        self.board = state.get("board", self.board)
+        self.current_player = state.get("current_player", self.current_player)
+        self.score = state.get("score", self.score)
+        self.lives = state.get("lives", self.lives)
+        self.game_time = state.get("game_time", self.game_time)
+        self.game_state = GameState(state.get("game_state", "waiting"))
+        self.winner = state.get("winner")
+        self.is_my_turn = state.get("your_turn", False)
+        self.my_player_number = state.get("my_player_number")
+
+    def make_move(self, from_pos, to_pos):
+        """Send a move to the server."""
+        if not self.game_id or not self.player_id:
+            return
+
+        payload = {
+            "game_id": self.game_id,
+            "player_id": self.player_id,
+            "from": from_pos,
+            "to": to_pos
+        }
         
-        if msg_type == "player_assigned":
-            self.player_id = message["player_id"]
-            print(f"Assigned as Player {self.player_id}")
-            
-        elif msg_type == "game_start":
-            self.game_state = GameState.PLAYING
-            self.board = message["board"]
-            self.current_player = message["current_player"]
-            print("Game started!")
-            
-        elif msg_type == "game_update":
-            self.board = message["board"]
-            self.current_player = message["current_player"]
-            self.score = message.get("score", self.score)
-            self.lives = message.get("lives", self.lives)
-            self.game_time = message.get("game_time", self.game_time)
-            
-        elif msg_type == "game_over":
-            self.game_state = GameState.GAME_OVER
-            self.winner = message["winner"]
-            print(f"Game Over! Winner: Player {self.winner}")
-            
-        elif msg_type == "invalid_move":
-            print("Invalid move!")
-   
+        state = self.http_request('POST', '/make_move', payload)
+        if state:
+            self.update_local_state(state)
+        else:
+            print("Invalid move refused by server.")
+        self.selected_piece = None
+
     def get_pieces_with_mandatory_moves(self):
-        """Get all pieces that have mandatory jumps available"""
         mandatory_pieces = []
-        if self.game_state != GameState.PLAYING or self.current_player != self.player_id:
+        is_my_turn = self.game_state == GameState.PLAYING and self.current_player == (1 if self.player_id and '1' in self.player_id else 2) 
+        
+        if self.game_state != GameState.PLAYING:
             return mandatory_pieces
             
         for row in range(8):
             for col in range(8):
                 if (self.board[row][col] and 
-                    self.board[row][col]["player"] == self.player_id):
+                    self.board[row][col]["player"] == self.current_player): # Check current player's pieces
                     moves = self.get_valid_moves(row, col)
-                    # Check if any move is a jump
                     if any(abs(move[0] - row) > 1 for move in moves):
                         mandatory_pieces.append((row, col))
         return mandatory_pieces
 
     def get_movable_pieces(self):
-        """Get all pieces that can move (either mandatory jumps or regular moves)"""
         movable_pieces = []
-        if self.game_state != GameState.PLAYING or self.current_player != self.player_id:
-            return movable_pieces
-            
+        if self.game_state != GameState.PLAYING:
+             return movable_pieces
+        
         for row in range(8):
             for col in range(8):
                 if (self.board[row][col] and 
-                    self.board[row][col]["player"] == self.player_id):
-                    if self.get_valid_moves(row, col):  # If piece has any valid moves
+                    self.board[row][col]["player"] == self.current_player):
+                    if self.get_valid_moves(row, col):
                         movable_pieces.append((row, col))
         return movable_pieces
 
     def draw_board(self):
-        """Draw the checkers board with visual cues for movable pieces"""
         mandatory_pieces = self.get_pieces_with_mandatory_moves()
         movable_pieces = self.get_movable_pieces()
         
         for row in range(8):
             for col in range(8):
-                x = col * self.CELL_SIZE
-                y = row * self.CELL_SIZE
-                
-                # Draw square
-                if (row + col) % 2 == 0:
-                    color = self.LIGHT_BROWN
-                else:
-                    color = self.DARK_BROWN
-                    
+                x, y = col * self.CELL_SIZE, row * self.CELL_SIZE
+                color = self.LIGHT_BROWN if (row + col) % 2 == 0 else self.DARK_BROWN
                 pygame.draw.rect(self.screen, color, (x, y, self.CELL_SIZE, self.CELL_SIZE))
-                
-                # Highlight pieces based on move rules
+
                 if (row, col) in mandatory_pieces:
-                    # Red outline for pieces with mandatory jumps
                     pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
                 elif not mandatory_pieces and (row, col) in movable_pieces:
-                    # Blue outline for movable pieces when no mandatory jumps
                     pygame.draw.rect(self.screen, self.YELLOW, (x, y, self.CELL_SIZE, self.CELL_SIZE), 3)
-                
-                # Draw piece
-                if self.board[row][col]:
-                    piece = self.board[row][col]
-                    center_x = x + self.CELL_SIZE // 2
-                    center_y = y + self.CELL_SIZE // 2
-                    
-                    # Piece color
-                    if piece["player"] == 1:
-                        piece_color = self.RED
-                    else:
-                        piece_color = self.BLUE
-                        
-                    # Draw piece
+
+                piece = self.board[row][col]
+                if piece:
+                    center_x, center_y = x + self.CELL_SIZE // 2, y + self.CELL_SIZE // 2
+                    piece_color = self.RED if piece["player"] == 1 else self.BLUE
                     pygame.draw.circle(self.screen, piece_color, (center_x, center_y), 30)
                     pygame.draw.circle(self.screen, self.BLACK, (center_x, center_y), 30, 3)
                     
-                    # Draw king crown
-                    if piece["type"] == "king":
+                    if piece["type"] == PieceType.KING.value:
                         pygame.draw.circle(self.screen, self.YELLOW, (center_x, center_y), 15)
-                        
-        if self.selected_piece and self.current_player == self.player_id:
+
+        if self.selected_piece:
             row, col = self.selected_piece
-            x = col * self.CELL_SIZE
-            y = row * self.CELL_SIZE
-            
-            # Highlight selected piece with thick green border
+            x, y = col * self.CELL_SIZE, row * self.CELL_SIZE
             pygame.draw.rect(self.screen, self.GREEN, (x, y, self.CELL_SIZE, self.CELL_SIZE), 5)
-            
-            # Draw valid moves with more visible indicators
+
             valid_moves = self.get_valid_moves(row, col)
             for move_row, move_col in valid_moves:
-                move_x = move_col * self.CELL_SIZE
-                move_y = move_row * self.CELL_SIZE
-                pygame.draw.circle(self.screen, self.GREEN, 
-                                (move_x + self.CELL_SIZE//2, move_y + self.CELL_SIZE//2), 10)
-
-    def handle_click(self, pos):
-        """Handle mouse click with move enforcement"""
-        if pos[0] >= self.BOARD_SIZE:  # Click outside board
-            return
-            
-        col = pos[0] // self.CELL_SIZE
-        row = pos[1] // self.CELL_SIZE
-        
-        if 0 <= row < 8 and 0 <= col < 8:
-            mandatory_pieces = self.get_pieces_with_mandatory_moves()
-            movable_pieces = self.get_movable_pieces()
-            
-            if self.selected_piece is None:
-                # Select piece - enforce move rules
-                if (self.board[row][col] and 
-                    self.board[row][col]["player"] == self.player_id and
-                    self.current_player == self.player_id and
-                    self.game_state == GameState.PLAYING):
-                    
-                    # Check if piece is movable
-                    if (row, col) not in movable_pieces:
-                        print("This piece cannot move!")
-                        return
-                    
-                    # If there are mandatory pieces, only allow selecting them
-                    if mandatory_pieces:
-                        if (row, col) in mandatory_pieces:
-                            self.selected_piece = (row, col)
-                            print(f"Selected mandatory piece at ({row}, {col})")
-                        else:
-                            print("You must select a piece with mandatory moves first!")
-                            return
-                    else:
-                        self.selected_piece = (row, col)
-                        print(f"Selected piece at ({row}, {col})")
-            else:
-                # Try to move
-                if self.selected_piece == (row, col):
-                    # Deselect
-                    self.selected_piece = None
-                    print("Deselected piece")
-                else:
-                    # Attempt move
-                    valid_moves = self.get_valid_moves(*self.selected_piece)
-                    if (row, col) in [(move[0], move[1]) for move in valid_moves]:
-                        print(f"Making move from {self.selected_piece} to ({row}, {col})")
-                        self.make_move(self.selected_piece, (row, col))
-                    else:
-                        print(f"Invalid move to ({row}, {col})")
-                    self.selected_piece = None
+                move_x, move_y = move_col * self.CELL_SIZE, move_row * self.CELL_SIZE
+                pygame.draw.circle(self.screen, self.GREEN, (move_x + self.CELL_SIZE // 2, move_y + self.CELL_SIZE // 2), 10)
 
     def get_valid_moves(self, row, col):
-        """Get valid moves for a piece, prioritizing jumps and detecting multiple jumps"""
         if not self.board[row][col]:
             return []
-            
+        
         piece = self.board[row][col]
         valid_moves = []
         mandatory_jumps = []
         
-        # Direction depends on player and piece type
         if piece["type"] == "king":
             directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
         else:
-            if piece["player"] == 1:
-                directions = [(1, -1), (1, 1)]
-            else:
-                directions = [(-1, -1), (-1, 1)]
-                
-        # First check for jumps
+            directions = [(1, -1), (1, 1)] if piece["player"] == 1 else [(-1, -1), (-1, 1)]
+            
         for dr, dc in directions:
             new_row, new_col = row + dr, col + dc
-            
-            # Check bounds
             if 0 <= new_row < 8 and 0 <= new_col < 8:
                 if (self.board[new_row][new_col] and 
                     self.board[new_row][new_col]["player"] != piece["player"]):
-                    # Check for jump space
                     jump_row, jump_col = new_row + dr, new_col + dc
-                    if (0 <= jump_row < 8 and 0 <= jump_col < 8 and 
-                        not self.board[jump_row][jump_col]):
-                        # This is a valid jump
+                    if 0 <= jump_row < 8 and 0 <= jump_col < 8 and not self.board[jump_row][jump_col]:
                         mandatory_jumps.append((jump_row, jump_col))
                         
-        # If there are jumps available, only return jumps
         if mandatory_jumps:
             return mandatory_jumps
             
-        # If no jumps, return regular moves
         for dr, dc in directions:
             new_row, new_col = row + dr, col + dc
-            
-            # Check bounds
-            if 0 <= new_row < 8 and 0 <= new_col < 8:
-                if not self.board[new_row][new_col]:
-                    valid_moves.append((new_row, new_col))
-                    
+            if 0 <= new_row < 8 and 0 <= new_col < 8 and not self.board[new_row][new_col]:
+                valid_moves.append((new_row, new_col))
+                
         return valid_moves
-        
-    def make_move(self, from_pos, to_pos):
-        """Make a move"""
-        if self.game_state != GameState.PLAYING or self.current_player != self.player_id:
-            return False
+
+    def handle_click(self, pos):
+        if pos[0] >= self.BOARD_SIZE: return
             
-        move_data = {
-            "type": "make_move",
-            "from": from_pos,
-            "to": to_pos
-        }
-        self.send_message(move_data)
-        return True
+        col = pos[0] // self.CELL_SIZE
+        row = pos[1] // self.CELL_SIZE
         
+        if not self.is_my_turn:
+            print("Not your turn!")
+            return
+
+        if 0 <= row < 8 and 0 <= col < 8:
+            mandatory_pieces = self.get_pieces_with_mandatory_moves()
+            
+            if self.selected_piece is None:
+                if (self.board[row][col] and self.board[row][col]["player"] == self.current_player):
+                    if mandatory_pieces and (row, col) not in mandatory_pieces:
+                        print("You must make a mandatory jump.")
+                        return
+                    self.selected_piece = (row, col)
+            else:
+                if self.selected_piece == (row, col):
+                    self.selected_piece = None
+                else:
+                    valid_moves = self.get_valid_moves(*self.selected_piece)
+                    if (row, col) in valid_moves:
+                        self.make_move(self.selected_piece, (row, col))
+                    else:
+                        print("Invalid move.")
+                        self.selected_piece = None
+
+
     def draw_ui(self):
-        """Draw the user interface"""
-        # Game info panel
         info_x = self.BOARD_SIZE + 10
         
-        # Current player
-        player_text = f"Current Player: {self.current_player}"
-        text_surface = self.font.render(player_text, True, self.BLACK)
+        # Game State
+        state_text = f"Status: {self.game_state.value.replace('_', ' ').title()}"
+        if self.game_state == GameState.WAITING:
+            state_text = self.status_message
+        elif self.game_state == GameState.GAME_OVER:
+            state_text = f"Game Over! Winner: Player {self.winner}"
+
+        text_surface = self.font.render(state_text, True, self.BLACK)
         self.screen.blit(text_surface, (info_x, 20))
-        
-        # Your player
-        your_player_text = f"You are: Player {self.player_id if self.player_id else 'None'}"
-        text_surface = self.small_font.render(your_player_text, True, self.BLACK)
+
+        # Player Info
+        player_text = f"You are Player {self.my_player_number}" if self.my_player_number else "You are a spectator"
+
+        text_surface = self.small_font.render(player_text, True, self.BLACK)
         self.screen.blit(text_surface, (info_x, 60))
         
-        # Score
-        score_text = f"Score:"
-        text_surface = self.font.render(score_text, True, self.BLACK)
+        # Turn Info
+        turn_text = f"Turn: Player {self.current_player}"
+        color = self.RED if self.current_player == 1 else self.BLUE
+        text_surface = self.font.render(turn_text, True, color)
         self.screen.blit(text_surface, (info_x, 100))
         
-        p1_score = f"Player 1: {self.score.get('player1', 0)}"
-        text_surface = self.small_font.render(p1_score, True, self.RED)
-        self.screen.blit(text_surface, (info_x, 130))
-        
-        p2_score = f"Player 2: {self.score.get('player2', 0)}"
-        text_surface = self.small_font.render(p2_score, True, self.BLUE)
-        self.screen.blit(text_surface, (info_x, 150))
-        
-        # Lives
-        lives_text = f"Pieces Left:"
-        text_surface = self.font.render(lives_text, True, self.BLACK)
-        self.screen.blit(text_surface, (info_x, 190))
-        
-        p1_lives = f"Player 1: {self.lives.get('player1', 12)}"
-        text_surface = self.small_font.render(p1_lives, True, self.RED)
-        self.screen.blit(text_surface, (info_x, 220))
-        
-        p2_lives = f"Player 2: {self.lives.get('player2', 12)}"
-        text_surface = self.small_font.render(p2_lives, True, self.BLUE)
-        self.screen.blit(text_surface, (info_x, 240))
-        
-        # Game time
+        # Score and Lives
+        p1_lives = f"Player 1 Pieces: {self.lives.get('player1', 12)}"
+        self.screen.blit(self.small_font.render(p1_lives, True, self.RED), (info_x, 140))
+        p2_lives = f"Player 2 Pieces: {self.lives.get('player2', 12)}"
+        self.screen.blit(self.small_font.render(p2_lives, True, self.BLUE), (info_x, 160))
+
+        # Game Time
         time_text = f"Time: {self.game_time//60:02d}:{self.game_time%60:02d}"
-        text_surface = self.small_font.render(time_text, True, self.BLACK)
-        self.screen.blit(text_surface, (info_x, 280))
-        
-        # Game state
-        if self.game_state == GameState.WAITING:
-            state_text = "Waiting for opponent..."
-            color = self.GRAY
-        elif self.game_state == GameState.PLAYING:
-            if self.current_player == self.player_id:
-                state_text = "Your turn!"
-                color = self.GREEN
-            else:
-                state_text = "Opponent's turn"
-                color = self.YELLOW
-        else:
-            if hasattr(self, 'winner'):
-                if self.winner == self.player_id:
-                    state_text = "You Win!"
-                    color = self.GREEN
-                else:
-                    state_text = "You Lose!"
-                    color = self.RED
-            else:
-                state_text = "Game Over"
-                color = self.GRAY
-                
-        text_surface = self.font.render(state_text, True, color)
-        self.screen.blit(text_surface, (info_x, 320))
-        
+        self.screen.blit(self.small_font.render(time_text, True, self.BLACK), (info_x, 200))
+
+
     def run(self):
         """Main game loop"""
-        if not self.connect_to_server():
-            print("Failed to connect to server")
+        if not self.join_game():
+            print("Failed to join game. Exiting.")
             return
             
+        # Start polling thread
+        poll_thread = threading.Thread(target=self.background_updater)
+        poll_thread.daemon = True
+        poll_thread.start()
+        
         clock = pygame.time.Clock()
         running = True
         
@@ -427,32 +338,19 @@ class CheckersClient:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    if event.button == 1:  # Left click
-                        self.handle_click(event.pos)
-                        
-            # Clear screen
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_click(event.pos)
+                    
             self.screen.fill(self.WHITE)
-            
-            # Draw game
             self.draw_board()
             self.draw_ui()
-            
-            # Update display
             pygame.display.flip()
-            clock.tick(60)
+            clock.tick(30)
             
-        # Cleanup
-        if self.socket:
-            self.socket.close()
         pygame.quit()
 
 if __name__ == "__main__":
-    if len(sys.argv) > 2:
-        host = sys.argv[1]
-        port = int(sys.argv[2])
-        client = CheckersClient(host, port)
-    else:
-        client = CheckersClient()
-    
+    host = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+    client = CheckersClient(host, port)
     client.run()
