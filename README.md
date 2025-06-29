@@ -102,3 +102,6 @@ pip install pygame
  **Restart Game**
 - Setelah permainan selesai, klik tombol **"RESTART GAME"** untuk memulai ulang permainan.
 - Permainan hanya akan di-restart jika **kedua pemain menyetujui**.
+ 
+
+Selamat bermain & semoga menang! 🏆
